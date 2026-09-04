@@ -1,0 +1,300 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function roomPath(roomId) { return /databases/$(database)/documents/races/$(roomId); }
+    function memberPath(roomId, authId) {
+      return /databases/$(database)/documents/races/$(roomId)/members/$(authId);
+    }
+    function banPath(roomId, authId) {
+      return /databases/$(database)/documents/races/$(roomId)/bans/$(authId);
+    }
+    function artifactPath(ownerUid, sha256) {
+      return /databases/$(database)/documents/packArtifacts/$(ownerUid)/items/$(sha256);
+    }
+    function sharePath(shareId) {
+      return /databases/$(database)/documents/packShares/$(shareId);
+    }
+    function isMember(roomId) {
+      return signedIn() && exists(memberPath(roomId, request.auth.uid));
+    }
+    function isOwner(roomId) {
+      return signedIn() && exists(roomPath(roomId))
+        && get(roomPath(roomId)).data.ownerAuthId == request.auth.uid;
+    }
+    function validId(value) { return value is string && value.size() >= 1 && value.size() <= 128; }
+    function validSha256(value) { return value is string && value.matches('^[a-f0-9]{64}$'); }
+    function validEpoch(value) { return value is int && value >= 0 && value <= 4102444800000; }
+    function validDistance(value) { return value is number && value >= 0 && value <= 1000000000000; }
+    // Legacy rooms omit this setting and allow banked distance. Once created the room policy
+    // cannot be rewritten by either the owner or a participant. Movement itself is client-reported.
+    function validBankPolicy(data) {
+      return !data.keys().hasAny(['allowBankedDistance']) || data.allowBankedDistance is bool;
+    }
+
+    function validArtifact(data, ownerUid, sha256) {
+      return data.keys().hasOnly([
+          'v', 'ownerUid', 'sha256', 'byteCount', 'portablePackId',
+          'portableRevision', 'objectPath', 'status', 'createdAtEpochMillis',
+          'updatedAtEpochMillis', 'lastSyncedAt'
+        ])
+        && data.v == 1 && ownerUid == data.ownerUid && sha256 == data.sha256
+        && validSha256(data.sha256)
+        && data.byteCount is int && data.byteCount >= 1 && data.byteCount <= 41943040
+        && validId(data.portablePackId) && data.portableRevision is int && data.portableRevision >= 1
+        && data.objectPath == 'walkpacks/' + ownerUid + '/' + sha256 + '.walkpack'
+        && data.status in ['uploading', 'ready', 'deleting']
+        && validEpoch(data.createdAtEpochMillis) && validEpoch(data.updatedAtEpochMillis)
+        && data.updatedAtEpochMillis >= data.createdAtEpochMillis
+        && data.lastSyncedAt is timestamp && data.lastSyncedAt == request.time;
+    }
+    function artifactReady(ownerUid, sha256) {
+      return exists(artifactPath(ownerUid, sha256))
+        && get(artifactPath(ownerUid, sha256)).data.status == 'ready';
+    }
+    function validShare(data, shareId) {
+      let artifact = get(artifactPath(data.ownerUid, data.sha256)).data;
+      return data.keys().hasOnly([
+          'v', 'ownerUid', 'sha256', 'byteCount', 'portablePackId',
+          'portableRevision', 'objectPath', 'thumbnailPath', 'featuredChallengeId',
+          'challengeFingerprint', 'packTitle', 'challengeTitle', 'challengeDescription',
+          'goalMeters', 'includedRouteCount', 'isOpen', 'createdAtEpochMillis',
+          'updatedAtEpochMillis', 'lastSyncedAt'
+        ])
+        && data.v == 1 && shareId is string && shareId.size() == 43
+        && validId(data.ownerUid) && validSha256(data.sha256)
+        && exists(artifactPath(data.ownerUid, data.sha256))
+        && artifact.status in ['ready', 'deleting']
+        && data.byteCount == artifact.byteCount && data.portablePackId == artifact.portablePackId
+        && data.portableRevision == artifact.portableRevision && data.objectPath == artifact.objectPath
+        && validId(data.featuredChallengeId) && validSha256(data.challengeFingerprint)
+        && data.thumbnailPath is string
+        && (data.thumbnailPath == ''
+          || data.thumbnailPath == 'walkpack-thumbnails/' + data.ownerUid + '/' + data.sha256
+            + '/' + data.challengeFingerprint + '.webp')
+        && data.packTitle is string && data.packTitle.size() >= 1 && data.packTitle.size() <= 120
+        && data.challengeTitle is string && data.challengeTitle.size() >= 1
+          && data.challengeTitle.size() <= 120
+        && data.challengeDescription is string && data.challengeDescription.size() <= 4000
+        && data.goalMeters is number && data.goalMeters > 0 && data.goalMeters <= 1000000000000
+        && data.includedRouteCount is int && data.includedRouteCount >= 1
+          && data.includedRouteCount <= 1000 && data.isOpen is bool
+        && validEpoch(data.createdAtEpochMillis) && validEpoch(data.updatedAtEpochMillis)
+        && data.updatedAtEpochMillis >= data.createdAtEpochMillis
+        && data.lastSyncedAt is timestamp && data.lastSyncedAt == request.time;
+    }
+    function validReaderGrant(data, ownerUid, sha256, readerUid) {
+      return data.keys().hasOnly([
+          'v', 'ownerUid', 'sha256', 'readerUid', 'sourceType', 'sourceId',
+          'createdAtEpochMillis', 'lastSyncedAt'
+        ])
+        && data.v == 1 && data.ownerUid == ownerUid && data.sha256 == sha256
+        && data.readerUid == readerUid && data.sourceType in ['share', 'race']
+        && validId(data.sourceId) && validEpoch(data.createdAtEpochMillis)
+        && data.lastSyncedAt is timestamp && data.lastSyncedAt == request.time;
+    }
+    function validShareGrant(data, ownerUid, sha256) {
+      let share = get(sharePath(data.sourceId)).data;
+      return data.sourceType == 'share' && exists(sharePath(data.sourceId))
+        && share.isOpen == true && share.ownerUid == ownerUid && share.sha256 == sha256;
+    }
+    function validRaceGrant(data, ownerUid, sha256) {
+      let room = get(roomPath(data.sourceId)).data;
+      return data.sourceType == 'race' && exists(roomPath(data.sourceId))
+        && room.v == 2 && room.deleting == false && room.artifactOwnerUid == ownerUid
+        && room.artifactSha256 == sha256 && (room.isOpen == true || isMember(data.sourceId));
+    }
+
+    function validRoomV1(data, roomId) {
+      return data.keys().hasOnly([
+          'v', 'name', 'packId', 'packRevision', 'challengeId', 'ownerParticipantId',
+          'ownerAuthId', 'isOpen', 'deleting', 'createdAtEpochMillis',
+          'updatedAtEpochMillis', 'lastSyncedAt', 'allowBankedDistance'
+        ])
+        && data.v == 1 && roomId is string && roomId.size() == 43
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && validId(data.packId) && data.packRevision is int && data.packRevision >= 1
+        && validId(data.challengeId) && validId(data.ownerParticipantId) && validId(data.ownerAuthId)
+        && data.isOpen is bool && data.deleting is bool && validBankPolicy(data)
+        && validEpoch(data.createdAtEpochMillis) && validEpoch(data.updatedAtEpochMillis)
+        && data.lastSyncedAt is timestamp && data.lastSyncedAt == request.time;
+    }
+    function validRoomV2File(data, roomId) {
+      return data.keys().hasOnly([
+          'v', 'name', 'packId', 'packRevision', 'challengeId', 'ownerParticipantId',
+          'ownerAuthId', 'isOpen', 'deleting', 'createdAtEpochMillis',
+          'updatedAtEpochMillis', 'lastSyncedAt', 'challengeFingerprint', 'allowBankedDistance'
+        ])
+        && data.v == 2 && roomId is string && roomId.size() == 43
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && validId(data.packId) && data.packRevision is int && data.packRevision >= 1
+        && validId(data.challengeId) && validSha256(data.challengeFingerprint)
+        && validId(data.ownerParticipantId) && validId(data.ownerAuthId)
+        && data.isOpen is bool && data.deleting is bool && validBankPolicy(data)
+        && validEpoch(data.createdAtEpochMillis) && validEpoch(data.updatedAtEpochMillis)
+        && data.lastSyncedAt is timestamp && data.lastSyncedAt == request.time;
+    }
+    function validRoomV2Hosted(data, roomId) {
+      let artifact = get(artifactPath(data.artifactOwnerUid, data.artifactSha256)).data;
+      return data.keys().hasOnly([
+          'v', 'name', 'packId', 'packRevision', 'challengeId', 'ownerParticipantId',
+          'ownerAuthId', 'isOpen', 'deleting', 'createdAtEpochMillis',
+          'updatedAtEpochMillis', 'lastSyncedAt', 'challengeFingerprint',
+          'artifactOwnerUid', 'artifactSha256', 'artifactByteCount',
+          'artifactPortablePackId', 'artifactPortableRevision', 'artifactObjectPath',
+          'artifactThumbnailPath', 'allowBankedDistance'
+        ])
+        && data.v == 2 && roomId is string && roomId.size() == 43
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 100
+        && validId(data.packId) && data.packRevision is int && data.packRevision >= 1
+        && validId(data.challengeId) && validSha256(data.challengeFingerprint)
+        && validId(data.ownerParticipantId) && validId(data.ownerAuthId)
+        && data.isOpen is bool && data.deleting is bool && validBankPolicy(data)
+        && validEpoch(data.createdAtEpochMillis) && validEpoch(data.updatedAtEpochMillis)
+        && data.lastSyncedAt is timestamp && data.lastSyncedAt == request.time
+        && data.artifactOwnerUid == data.ownerAuthId && validSha256(data.artifactSha256)
+        && exists(artifactPath(data.artifactOwnerUid, data.artifactSha256))
+        && artifact.status in ['ready', 'deleting']
+        && data.artifactByteCount == artifact.byteCount
+        && data.artifactPortablePackId == artifact.portablePackId
+        && data.artifactPortableRevision == artifact.portableRevision
+        && data.artifactObjectPath == artifact.objectPath && data.artifactThumbnailPath is string
+        && (data.artifactThumbnailPath == ''
+          || data.artifactThumbnailPath == 'walkpack-thumbnails/' + data.artifactOwnerUid + '/'
+            + data.artifactSha256 + '/' + data.challengeFingerprint + '.webp');
+    }
+    function validRoom(data, roomId) {
+      return validRoomV1(data, roomId) || validRoomV2File(data, roomId)
+        || validRoomV2Hosted(data, roomId);
+    }
+    function validMemberV1(data, roomId, memberAuthId) {
+      let room = getAfter(roomPath(roomId)).data;
+      return data.keys().hasOnly([
+          'v', 'participantId', 'nickname', 'packId', 'packRevision', 'challengeId',
+          'progressMeters', 'totalDistanceMeters', 'sequence', 'updatedAtEpochMillis',
+          'lastSyncedAt'
+        ])
+        && data.v == 1 && room.v == 1 && validId(data.participantId)
+        && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 80
+        && data.packId == room.packId && data.packRevision == room.packRevision
+        && data.challengeId == room.challengeId
+        && (data.participantId != room.ownerParticipantId || memberAuthId == room.ownerAuthId)
+        && (memberAuthId != room.ownerAuthId || data.participantId == room.ownerParticipantId)
+        && validDistance(data.progressMeters) && validDistance(data.totalDistanceMeters)
+        && data.sequence is int && data.sequence >= 0 && validEpoch(data.updatedAtEpochMillis)
+        && data.lastSyncedAt is timestamp && data.lastSyncedAt == request.time;
+    }
+    function validMemberV2(data, roomId, memberAuthId) {
+      let room = getAfter(roomPath(roomId)).data;
+      return data.keys().hasOnly([
+          'v', 'participantId', 'nickname', 'packId', 'packRevision', 'challengeId',
+          'challengeFingerprint', 'progressMeters', 'totalDistanceMeters', 'sequence',
+          'updatedAtEpochMillis', 'lastSyncedAt'
+        ])
+        && data.v == 2 && room.v == 2 && validId(data.participantId)
+        && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 80
+        && validId(data.packId) && data.packRevision is int && data.packRevision >= 1
+        && data.challengeId == room.challengeId && data.challengeFingerprint == room.challengeFingerprint
+        && (data.participantId != room.ownerParticipantId || memberAuthId == room.ownerAuthId)
+        && (memberAuthId != room.ownerAuthId || data.participantId == room.ownerParticipantId)
+        && validDistance(data.progressMeters) && validDistance(data.totalDistanceMeters)
+        && data.sequence is int && data.sequence >= 0 && validEpoch(data.updatedAtEpochMillis)
+        && data.lastSyncedAt is timestamp && data.lastSyncedAt == request.time;
+    }
+    function validMember(data, roomId, memberAuthId) {
+      return validMemberV1(data, roomId, memberAuthId) || validMemberV2(data, roomId, memberAuthId);
+    }
+
+    match /packArtifacts/{ownerUid}/items/{sha256} {
+      allow get: if signedIn() && (request.auth.uid == ownerUid
+        || exists(/databases/$(database)/documents/packArtifacts/$(ownerUid)/items/$(sha256)/readers/$(request.auth.uid)));
+      allow list: if false;
+      allow create: if signedIn() && request.auth.uid == ownerUid
+        && validArtifact(request.resource.data, ownerUid, sha256)
+        && request.resource.data.status == 'uploading';
+      allow update: if signedIn() && request.auth.uid == ownerUid
+        && validArtifact(request.resource.data, ownerUid, sha256)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'updatedAtEpochMillis', 'lastSyncedAt'])
+        && ((resource.data.status == 'uploading'
+            && request.resource.data.status in ['uploading', 'ready'])
+          || (resource.data.status == 'ready' && request.resource.data.status == 'deleting'));
+      allow delete: if signedIn() && request.auth.uid == ownerUid && resource.data.status == 'deleting';
+
+      match /readers/{readerUid} {
+        allow get: if signedIn() && (request.auth.uid == readerUid || request.auth.uid == ownerUid);
+        allow list: if false;
+        allow create, update: if signedIn() && request.auth.uid == readerUid
+          && validReaderGrant(request.resource.data, ownerUid, sha256, readerUid)
+          && (validShareGrant(request.resource.data, ownerUid, sha256)
+            || validRaceGrant(request.resource.data, ownerUid, sha256));
+        allow delete: if signedIn() && (request.auth.uid == readerUid || request.auth.uid == ownerUid);
+      }
+    }
+
+    match /packShares/{shareId} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid
+        && validShare(request.resource.data, shareId) && request.resource.data.isOpen == true
+        && artifactReady(request.resource.data.ownerUid, request.resource.data.sha256);
+      allow update: if signedIn() && resource.data.ownerUid == request.auth.uid
+        && validShare(request.resource.data, shareId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['isOpen', 'updatedAtEpochMillis', 'lastSyncedAt'])
+        && resource.data.isOpen == true && request.resource.data.isOpen == false;
+      allow delete: if signedIn() && resource.data.ownerUid == request.auth.uid;
+    }
+
+    match /races/{roomId} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn() && validRoom(request.resource.data, roomId)
+        && request.resource.data.ownerAuthId == request.auth.uid
+        && (request.resource.data.v == 1
+          || !request.resource.data.keys().hasAny(['artifactOwnerUid'])
+          || artifactReady(request.resource.data.artifactOwnerUid, request.resource.data.artifactSha256));
+      allow update: if isOwner(roomId) && validRoom(request.resource.data, roomId)
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['name', 'isOpen', 'deleting', 'updatedAtEpochMillis', 'lastSyncedAt'])
+        && resource.data.deleting == false
+        && (request.resource.data.deleting == false || request.resource.data.isOpen == false)
+        && request.resource.data.updatedAtEpochMillis >= resource.data.updatedAtEpochMillis;
+      allow delete: if isOwner(roomId);
+
+      match /members/{memberAuthId} {
+        allow get: if signedIn() && (request.auth.uid == memberAuthId || isMember(roomId));
+        allow list: if isMember(roomId) || isOwner(roomId);
+        allow create: if signedIn() && request.auth.uid == memberAuthId
+          && existsAfter(roomPath(roomId)) && !existsAfter(banPath(roomId, memberAuthId))
+          && getAfter(roomPath(roomId)).data.deleting == false
+          && (getAfter(roomPath(roomId)).data.isOpen
+            || getAfter(roomPath(roomId)).data.ownerAuthId == request.auth.uid)
+          && validMember(request.resource.data, roomId, memberAuthId);
+        allow update: if signedIn() && request.auth.uid == memberAuthId
+          && getAfter(roomPath(roomId)).data.deleting == false
+          && validMember(request.resource.data, roomId, memberAuthId)
+          && request.resource.data.participantId == resource.data.participantId
+          && (request.resource.data.sequence > resource.data.sequence
+            || (request.resource.data.sequence == resource.data.sequence
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSyncedAt'])))
+          && request.resource.data.updatedAtEpochMillis >= resource.data.updatedAtEpochMillis;
+        allow delete: if signedIn() && (request.auth.uid == memberAuthId || isOwner(roomId));
+      }
+
+      match /bans/{bannedAuthId} {
+        allow get: if signedIn() && (request.auth.uid == bannedAuthId || isOwner(roomId));
+        allow list: if isOwner(roomId);
+        allow create, update: if isOwner(roomId)
+          && request.resource.data.keys().hasOnly(['v', 'updatedAtEpochMillis', 'lastSyncedAt'])
+          && request.resource.data.v == 1 && validEpoch(request.resource.data.updatedAtEpochMillis)
+          && request.resource.data.lastSyncedAt is timestamp
+          && request.resource.data.lastSyncedAt == request.time;
+        allow delete: if isOwner(roomId);
+      }
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}

@@ -1,0 +1,32 @@
+# Dependencies and test output
+node_modules/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+*.log
+coverage/
+
+# Firebase CLI state and live project selection
+.firebase/
+.firebaserc
+
+# Real Firebase Android configuration
+google-services.json
+**/google-services.json
+!examples/google-services.example.json
+
+# Credentials and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*service-account*.json
+*adminsdk*.json
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,18 @@
+{
+  "name": "diy-walking-challenges-firebase-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Firebase security rules and emulator tests for self-hosted DIY Walking Challenges race servers.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "npx --yes firebase-tools@15.29.0 emulators:exec --config firebase.json --project demo-diywc --only firestore,storage \"node --test test/rules.test.cjs\"",
+    "test:assertions": "node --test test/rules.test.cjs"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.2",
+    "firebase": "12.18.0"
+  }
+}

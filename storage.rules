@@ -1,0 +1,86 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function validSha256(value) {
+      return value is string && value.matches('^[a-f0-9]{64}$');
+    }
+    function artifactPath(ownerUid, sha256) {
+      return /databases/(default)/documents/packArtifacts/$(ownerUid)/items/$(sha256);
+    }
+    function readerPath(ownerUid, sha256) {
+      return /databases/(default)/documents/packArtifacts/$(ownerUid)/items/$(sha256)/readers/$(request.auth.uid);
+    }
+    function artifactInState(ownerUid, sha256, state) {
+      return firestore.exists(artifactPath(ownerUid, sha256))
+        && firestore.get(artifactPath(ownerUid, sha256)).data.status == state;
+    }
+    function canRead(ownerUid, sha256) {
+      return signedIn() && firestore.exists(artifactPath(ownerUid, sha256))
+        && (request.auth.uid == ownerUid
+          || (firestore.get(artifactPath(ownerUid, sha256)).data.status == 'ready'
+            && firestore.exists(readerPath(ownerUid, sha256))));
+    }
+    function validWalkpackCreate(ownerUid, sha256) {
+      let artifact = firestore.get(artifactPath(ownerUid, sha256)).data;
+      return signedIn() && request.auth.uid == ownerUid
+        && resource == null && request.resource != null
+        && validSha256(sha256) && artifactInState(ownerUid, sha256, 'uploading')
+        && request.resource.size >= 1 && request.resource.size <= 41943040
+        && request.resource.contentType == 'application/vnd.diywalkingchallenges.walkpack+zip'
+        && request.resource.metadata.sha256 == sha256
+        && request.resource.metadata.ownerUid == ownerUid
+        && artifact.byteCount == request.resource.size
+        && artifact.objectPath == 'walkpacks/' + ownerUid + '/' + sha256 + '.walkpack';
+    }
+    function validThumbnailCreate(ownerUid, sha256, challengeFingerprint) {
+      return signedIn() && request.auth.uid == ownerUid
+        && resource == null && request.resource != null
+        && validSha256(sha256) && validSha256(challengeFingerprint)
+        && (artifactInState(ownerUid, sha256, 'uploading')
+          || artifactInState(ownerUid, sha256, 'ready'))
+        && request.resource.size >= 1 && request.resource.size <= 262144
+        && request.resource.contentType == 'image/webp'
+        && request.resource.metadata.sha256 == sha256
+        && request.resource.metadata.ownerUid == ownerUid
+        && request.resource.metadata.challengeFingerprint == challengeFingerprint;
+    }
+
+    match /walkpacks/{ownerUid}/{fileName} {
+      allow list: if false;
+      allow get: if validSha256(resource.metadata.sha256)
+        && fileName == resource.metadata.sha256 + '.walkpack'
+        && canRead(ownerUid, resource.metadata.sha256);
+      allow write: if (request.resource != null
+          && validSha256(request.resource.metadata.sha256)
+          && fileName == request.resource.metadata.sha256 + '.walkpack'
+          && validWalkpackCreate(ownerUid, request.resource.metadata.sha256))
+        || (request.resource == null && validSha256(resource.metadata.sha256)
+          && fileName == resource.metadata.sha256 + '.walkpack'
+          && signedIn() && request.auth.uid == ownerUid
+          && artifactInState(ownerUid, resource.metadata.sha256, 'deleting'));
+    }
+
+    match /walkpack-thumbnails/{ownerUid}/{sha256}/{fileName} {
+      allow list: if false;
+      allow get: if validSha256(resource.metadata.challengeFingerprint)
+        && fileName == resource.metadata.challengeFingerprint + '.webp'
+        && canRead(ownerUid, sha256);
+      allow write: if (request.resource != null
+          && validSha256(request.resource.metadata.challengeFingerprint)
+          && fileName == request.resource.metadata.challengeFingerprint + '.webp'
+          && validThumbnailCreate(ownerUid, sha256, request.resource.metadata.challengeFingerprint))
+        || (request.resource == null && validSha256(resource.metadata.challengeFingerprint)
+          && fileName == resource.metadata.challengeFingerprint + '.webp'
+          && signedIn() && request.auth.uid == ownerUid
+          && artifactInState(ownerUid, sha256, 'deleting'));
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

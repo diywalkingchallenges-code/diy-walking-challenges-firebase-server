@@ -222,7 +222,7 @@ test("closing a share blocks new reader grants", async () => {
   ));
 });
 
-test("open v2 race grants invite holders; closed race grants only existing members", async () => {
+test("closed v2 races remain readable to members and freeze final standings", async () => {
   const { db } = await publishOwnerArtifact();
   const roomId = "R".repeat(43);
   const room = doc(db, "races", roomId);
@@ -254,7 +254,8 @@ test("open v2 race grants invite holders; closed race grants only existing membe
     readerDb, "packArtifacts", ownerUid, "items", sha256, "readers", readerUid,
   );
   await assertSucceeds(setDoc(readerGrantRef, readerGrant("race", roomId)));
-  await assertSucceeds(setDoc(doc(readerDb, "races", roomId, "members", readerUid), {
+  const readerMember = doc(readerDb, "races", roomId, "members", readerUid);
+  await assertSucceeds(setDoc(readerMember, {
     v: 2,
     participantId: "reader-participant",
     nickname: "Reader",
@@ -273,13 +274,51 @@ test("open v2 race grants invite holders; closed race grants only existing membe
     updatedAtEpochMillis: 3,
     lastSyncedAt: serverTimestamp(),
   }));
+  const finalRoom = await assertSucceeds(getDoc(doc(readerDb, "races", roomId)));
+  assert.equal(finalRoom.data().isOpen, false);
+  await assertSucceeds(getDocs(collection(readerDb, "races", roomId, "members")));
+  await assertFails(updateDoc(readerMember, {
+    progressMeters: 100,
+    totalDistanceMeters: 100,
+    sequence: 1,
+    updatedAtEpochMillis: 4,
+    lastSyncedAt: serverTimestamp(),
+  }));
+  await assertFails(updateDoc(room, {
+    isOpen: true,
+    updatedAtEpochMillis: 4,
+    lastSyncedAt: serverTimestamp(),
+  }));
+  await assertFails(deleteDoc(readerMember));
+  await assertFails(deleteDoc(doc(db, "races", roomId, "members", readerUid)));
   await assertSucceeds(setDoc(readerGrantRef, readerGrant("race", roomId)));
   const outsiderUid = "outsider";
   const outsider = environment.authenticatedContext(outsiderUid);
+  const outsiderDb = outsider.firestore();
+  await assertFails(setDoc(doc(outsiderDb, "races", roomId, "members", outsiderUid), {
+    v: 2,
+    participantId: "outsider-participant",
+    nickname: "Outsider",
+    packId: "outsider-pack",
+    packRevision: 1,
+    challengeId: "challenge",
+    challengeFingerprint,
+    progressMeters: 0,
+    totalDistanceMeters: 0,
+    sequence: 0,
+    updatedAtEpochMillis: 4,
+    lastSyncedAt: serverTimestamp(),
+  }));
   await assertFails(setDoc(
-    doc(outsider.firestore(), "packArtifacts", ownerUid, "items", sha256, "readers", outsiderUid),
+    doc(outsiderDb, "packArtifacts", ownerUid, "items", sha256, "readers", outsiderUid),
     readerGrant("race", roomId, outsiderUid),
   ));
+  await assertSucceeds(updateDoc(room, {
+    deleting: true,
+    updatedAtEpochMillis: 5,
+    lastSyncedAt: serverTimestamp(),
+  }));
+  await assertSucceeds(deleteDoc(doc(db, "races", roomId, "members", readerUid)));
 });
 
 test("legacy v1 rooms remain creatable while room enumeration is denied", async () => {

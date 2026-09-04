@@ -259,6 +259,8 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys()
           .hasOnly(['name', 'isOpen', 'deleting', 'updatedAtEpochMillis', 'lastSyncedAt'])
         && resource.data.deleting == false
+        && (request.resource.data.isOpen == resource.data.isOpen
+          || (resource.data.isOpen == true && request.resource.data.isOpen == false))
         && (request.resource.data.deleting == false || request.resource.data.isOpen == false)
         && request.resource.data.updatedAtEpochMillis >= resource.data.updatedAtEpochMillis;
       allow delete: if isOwner(roomId);
@@ -269,18 +271,21 @@ service cloud.firestore {
         allow create: if signedIn() && request.auth.uid == memberAuthId
           && existsAfter(roomPath(roomId)) && !existsAfter(banPath(roomId, memberAuthId))
           && getAfter(roomPath(roomId)).data.deleting == false
-          && (getAfter(roomPath(roomId)).data.isOpen
-            || getAfter(roomPath(roomId)).data.ownerAuthId == request.auth.uid)
+          && getAfter(roomPath(roomId)).data.isOpen == true
           && validMember(request.resource.data, roomId, memberAuthId);
         allow update: if signedIn() && request.auth.uid == memberAuthId
           && getAfter(roomPath(roomId)).data.deleting == false
+          && getAfter(roomPath(roomId)).data.isOpen == true
           && validMember(request.resource.data, roomId, memberAuthId)
           && request.resource.data.participantId == resource.data.participantId
           && (request.resource.data.sequence > resource.data.sequence
             || (request.resource.data.sequence == resource.data.sequence
               && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastSyncedAt'])))
           && request.resource.data.updatedAtEpochMillis >= resource.data.updatedAtEpochMillis;
-        allow delete: if signedIn() && (request.auth.uid == memberAuthId || isOwner(roomId));
+        allow delete: if signedIn() && (request.auth.uid == memberAuthId || isOwner(roomId))
+          && existsAfter(roomPath(roomId))
+          && (getAfter(roomPath(roomId)).data.isOpen == true
+            || getAfter(roomPath(roomId)).data.deleting == true);
       }
 
       match /bans/{bannedAuthId} {

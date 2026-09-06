@@ -414,7 +414,7 @@ test("owner can create bank restrictions in v1 and file-only v2 rooms; recipient
   await assertFails(setDoc(doc(readerDb, "races", "I".repeat(43)), policyRoomData()));
 });
 
-test("bank policy must be boolean and cannot be rewritten by owner or participant", async () => {
+test("only the owner can edit a live race name and boolean bank policy; closed rules and identities stay fixed", async () => {
   const ownerDb = environment.authenticatedContext(ownerUid).firestore();
   const readerDb = environment.authenticatedContext(readerUid).firestore();
   const roomId = "J".repeat(43);
@@ -423,15 +423,24 @@ test("bank policy must be boolean and cannot be rewritten by owner or participan
   await assertFails(setDoc(room, policyRoomData(2, null)));
   await assertSucceeds(setDoc(room, policyRoomData()));
   const change = { allowBankedDistance: true, updatedAtEpochMillis: 2, lastSyncedAt: serverTimestamp() };
-  await assertFails(updateDoc(room, change));
-  await assertFails(updateDoc(doc(readerDb, "races", roomId), change));
+  await assertSucceeds(updateDoc(room, { ...change, name: "Renamed race" }));
+  await assertFails(updateDoc(doc(readerDb, "races", roomId), { ...change, name: "Hijacked" }));
+  await assertFails(updateDoc(room, { ...change, allowBankedDistance: "false" }));
+  await assertFails(updateDoc(room, { ...change, ownerAuthId: readerUid }));
+  await assertFails(updateDoc(room, { ...change, challengeId: "different-route" }));
+  await assertFails(updateDoc(room, { ...change, name: "" }));
   await assertSucceeds(updateDoc(room, {
     isOpen: false, updatedAtEpochMillis: 2, lastSyncedAt: serverTimestamp(),
   }));
-  assert.equal((await getDoc(room)).data().allowBankedDistance, false);
+  await assertFails(updateDoc(room, { ...change, allowBankedDistance: false }));
+  await assertSucceeds(updateDoc(room, { name: "Final race title", updatedAtEpochMillis: 3, lastSyncedAt: serverTimestamp() }));
+  const finalRoom = (await getDoc(room)).data();
+  assert.equal(finalRoom.name, "Final race title");
+  assert.equal(finalRoom.allowBankedDistance, true);
+  assert.equal(finalRoom.isOpen, false);
 });
 
-test("restricted hosted races keep valid artifacts and immutable policy", async () => {
+test("restricted hosted races keep valid artifacts", async () => {
   const { db } = await publishOwnerArtifact();
   const roomId = "K".repeat(43);
   await assertSucceeds(setDoc(doc(db, "races", roomId), {

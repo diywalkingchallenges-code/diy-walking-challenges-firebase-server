@@ -12,8 +12,9 @@ is maintained separately. The companion image-generation service is in
 
 - Keeps a private race room's standings synchronized between participants.
 - Lets each participant update only their own progress.
-- Lets a room owner close a race into read-only history, remove participants while a race is open,
-  and manage bans.
+- Lets a room owner edit a race name and its future banked-distance rule while open, close the race
+  into history, remove participants while open, and manage bans. Closed race names can be corrected;
+  final bank rules, route identity, ownership, and standings stay fixed.
 - Optionally stores private challenge-pack files for route links and assisted race joining.
 
 It does **not** receive raw Health Connect records, individual step observations, height, stride,

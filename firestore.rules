@@ -257,7 +257,8 @@ service cloud.firestore {
           || artifactReady(request.resource.data.artifactOwnerUid, request.resource.data.artifactSha256));
       allow update: if isOwner(roomId) && validRoom(request.resource.data, roomId)
         && request.resource.data.diff(resource.data).affectedKeys()
-          .hasOnly(['name', 'isOpen', 'deleting', 'updatedAtEpochMillis', 'lastSyncedAt'])
+          .hasOnly(['name', 'allowBankedDistance', 'isOpen', 'deleting', 'updatedAtEpochMillis', 'lastSyncedAt'])
+        && (resource.data.isOpen == true || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['allowBankedDistance']))
         && resource.data.deleting == false
         && (request.resource.data.isOpen == resource.data.isOpen
           || (resource.data.isOpen == true && request.resource.data.isOpen == false))

@@ -1,5 +1,10 @@
 # DIY Walking Challenges — Firebase race server
 
+Racer icons (Android 2.17.59): deploy the updated Firestore rules to allow the optional `racerIcon`
+member field. It contains a small inline WebP (at most 684 base64 characters), so no Storage bucket
+is required. Only the participant may update or remove it with an increasing sequence; other member
+and room permissions remain in force. Existing clients may omit it. Updated apps can still share
+progress on old private rules, but icons require these rules. The app's setup guide includes them.
 This repository contains the Firebase security configuration used by **DIY Walking Challenges**.
 It is public so a group can inspect the cloud boundary, test it, and run its own private race
 server without trusting hidden server code.

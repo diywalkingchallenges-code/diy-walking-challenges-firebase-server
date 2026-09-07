@@ -616,3 +616,21 @@ test("thumbnail paths are immutable, non-listable, and use the artifact reader g
   assert.deepEqual(Array.from(new Uint8Array(downloaded)), Array.from(thumbnailBytes));
   await assertFails(listAll(ref(reader.storage(), `walkpack-thumbnails/${ownerUid}/${sha256}`)));
 });
+
+
+test("bounded racer icons can be shared, replaced and removed only by their participant", async () => {
+  const roomId = "I".repeat(43);
+  const ownerDb = environment.authenticatedContext(ownerUid).firestore();
+  const readerDb = environment.authenticatedContext(readerUid).firestore();
+  await assertSucceeds(setDoc(doc(ownerDb, "races", roomId), policyRoomData()));
+  const member = doc(readerDb, "races", roomId, "members", readerUid);
+  const icon = "UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA";
+  await assertSucceeds(setDoc(member, { ...memberData({ uid: readerUid }), racerIcon: icon }));
+  await assertFails(setDoc(member, { ...memberData({ uid: readerUid, sequence: 1 }), racerIcon: "UklGR" + "A".repeat(680) }));
+  await assertFails(setDoc(member, { ...memberData({ uid: readerUid, sequence: 1 }), racerIcon: "https://example.com/image" }));
+  await assertFails(setDoc(doc(ownerDb, "races", roomId, "members", readerUid),
+    { ...memberData({ uid: readerUid, sequence: 1 }), racerIcon: icon }));
+  await assertSucceeds(setDoc(member, { ...memberData({ uid: readerUid, sequence: 1 }), racerIcon: icon }));
+  await assertSucceeds(setDoc(member, memberData({ uid: readerUid, sequence: 2 })));
+  assert.equal((await getDoc(member)).data().racerIcon, undefined);
+});

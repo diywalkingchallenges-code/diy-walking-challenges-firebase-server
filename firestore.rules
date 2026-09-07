@@ -168,14 +168,20 @@ service cloud.firestore {
       return validRoomV1(data, roomId) || validRoomV2File(data, roomId)
         || validRoomV2Hosted(data, roomId);
     }
+    function validRacerIcon(data) {
+      return !data.keys().hasAny(['racerIcon']) || (data.racerIcon is string
+        && data.racerIcon.size() >= 28 && data.racerIcon.size() <= 684
+        && data.racerIcon.matches('UklGR[A-Za-z0-9+/]*={0,2}'));
+    }
     function validMemberV1(data, roomId, memberAuthId) {
       let room = getAfter(roomPath(roomId)).data;
       return data.keys().hasOnly([
-          'v', 'participantId', 'nickname', 'packId', 'packRevision', 'challengeId',
+          'v', 'participantId', 'nickname', 'racerIcon', 'packId', 'packRevision', 'challengeId',
           'progressMeters', 'totalDistanceMeters', 'sequence', 'updatedAtEpochMillis',
           'lastSyncedAt'
         ])
         && data.v == 1 && room.v == 1 && validId(data.participantId)
+        && validRacerIcon(data)
         && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 80
         && data.packId == room.packId && data.packRevision == room.packRevision
         && data.challengeId == room.challengeId
@@ -188,11 +194,12 @@ service cloud.firestore {
     function validMemberV2(data, roomId, memberAuthId) {
       let room = getAfter(roomPath(roomId)).data;
       return data.keys().hasOnly([
-          'v', 'participantId', 'nickname', 'packId', 'packRevision', 'challengeId',
+          'v', 'participantId', 'nickname', 'racerIcon', 'packId', 'packRevision', 'challengeId',
           'challengeFingerprint', 'progressMeters', 'totalDistanceMeters', 'sequence',
           'updatedAtEpochMillis', 'lastSyncedAt'
         ])
         && data.v == 2 && room.v == 2 && validId(data.participantId)
+        && validRacerIcon(data)
         && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 80
         && validId(data.packId) && data.packRevision is int && data.packRevision >= 1
         && data.challengeId == room.challengeId && data.challengeFingerprint == room.challengeFingerprint

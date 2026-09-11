@@ -10,6 +10,12 @@ follow [Enable private route links](HOSTED_PACKS.md).
 
 ## Before you begin
 
+For Friends and the public leaderboard, deploy the supplied composite indexes as well as the
+rules, and wait for them to show **Enabled** in Firestore → Indexes. Android 2.17.76's setup guide
+includes a copy button for this configuration. An existing server with social relationships must
+also follow [the capacity migration](SOCIAL.md#server-setup) before clients are updated. A new
+server with no friendships does not need migration.
+
 The organizer needs:
 
 - a Google account;

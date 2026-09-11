@@ -29,9 +29,24 @@ Ordinary race synchronization does not upload:
 - awards or certificates; or
 - unrelated local routes and artwork.
 
-A Firestore-only server never receives map, badge, banner, or milestone art. Hosted sharing uploads
-the complete selected pack and its artwork only after its owner explicitly publishes a link or
-Storage-assisted race.
+Ordinary Firestore-only race sync does not receive map, badge, banner, or milestone art. Hosted
+sharing uploads the complete selected pack and its artwork only after its owner explicitly
+publishes a link or Storage-assisted race.
+
+## Optional social profiles
+
+Enabling Friends uploads nickname, icon, aggregate activity/source totals, race/medal counts,
+and saved medal titles, dates, and small thumbnails. Accepted friends can read the profile and
+trophy case. Public leaderboard participation is a separate opt-in and shares only the summary.
+Friend codes reveal nickname/icon before acceptance. Requests, blocks, and invitations store
+opaque identities and room metadata; these are not raw health records.
+
+Removing or blocking a friend revokes future private reads, and opting out removes the public
+entry. Already viewed information cannot be recalled. Records belong to the selected server and
+installation's anonymous identity. Profiles cannot be enumerated; public entries and social
+directories are paged. Capacity documents contain three numeric slot counts visible to signed-in
+clients so they can check a request; lists of relationships and mutation proofs remain private.
+See [social behavior, retention, limits, and migration](SOCIAL.md).
 
 ## Access model
 

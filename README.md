@@ -1,5 +1,13 @@
 # DIY Walking Challenges — Firebase race server
 
+Friends and leaderboards (Android **2.17.76**): optional friends-only profiles and trophy cases,
+direct race invitations, and a separately enabled public leaderboard. People can request friends
+from leaderboard entries. Rules atomically enforce **200 friends**, **50 incoming requests**, and
+**50 outgoing requests** per identity. Directory pages contain at most 25 people; supplied indexes
+support cursor paging and bounded notification catch-up. Deploy the rules and indexes together.
+For servers with older social relationships, run the [capacity migration](docs/SOCIAL.md#server-setup)
+before updating clients. Ordinary races keep their existing data and behavior.
+
 Racer icons (Android 2.17.59): deploy the updated Firestore rules to allow the optional `racerIcon`
 member field. It contains a small inline WebP (at most 684 base64 characters), so no Storage bucket
 is required. Only the participant may update or remove it with an increasing sequence; other member
@@ -21,9 +29,12 @@ is maintained separately. The companion image-generation service is in
   into history, remove participants while open, and manage bans. Closed race names can be corrected;
   final bank rules, route identity, ownership, and standings stay fixed.
 - Optionally stores private challenge-pack files for route links and assisted race joining.
+- Supports optional friend profiles, shared trophy summaries, invitations, and public rankings.
 
 It does **not** receive raw Health Connect records, individual step observations, height, stride,
-awards, or health permissions. Firestore-only rooms also do not upload route artwork.
+or health permissions. Ordinary race sync does not upload awards or route artwork. Enabling
+Friends separately uploads aggregate stats and medal titles, dates, and small thumbnails;
+see [social privacy and limits](docs/SOCIAL.md).
 
 There is no Cloud Function or traditional web server to run. The Android app talks directly to
 Firebase, and the two checked-in rule files decide which operations are allowed.
@@ -62,6 +73,7 @@ If you want hosted route links, continue with [Enable private route links](docs/
 - `test/rules.test.cjs` — security tests that exercise allowed and denied operations.
 - `examples/` — placeholders only; no live project or credential is included.
 - `docs/` — setup, privacy, data model, and maintenance guidance.
+- `tools/migrate-social-capacity.cjs` — audited reconciliation of existing friendship slot counts.
 
 ## Test before deploying
 

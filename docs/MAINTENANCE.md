@@ -13,6 +13,14 @@ Treat a rule edit as a security-sensitive protocol change.
 | `packArtifacts/{ownerUid}/items/{sha256}` | Immutable hosted-pack metadata/state | Denied |
 | `.../readers/{readerUid}` | Exact share/race download grant | Denied |
 | `packShares/{shareId}` | Unlisted hosted-route metadata | Denied |
+| `socialProfiles/{uid}` and `trophies` | Opt-in profile and trophy case | Profile list denied; trophy reads restricted to self/friends |
+| `friendCards/{uid}` | Exact-code nickname/icon | Denied |
+| `friendships/{sortedUidPair}` | Requests, accepted friends, blocks | Members only, 25 per directory page |
+| `socialInvites/{room_sender_recipient}` | Direct race invitations | Sender/recipient only, 25 per page |
+| `leaderboard/{uid}` | Separately opted-in public summary | Signed-in clients, 25 per page |
+| `socialCapacity/{uid}` | Three slot counts | Exact reads only |
+| `socialChanges/{uid}` | Proof for atomic slot/relationship updates | Exact reads by owner only |
+| `socialMaintenance/capacity` | Temporary migration lock | Admin only |
 
 Storage uses:
 
@@ -22,7 +30,19 @@ Storage uses:
 Room version 1 remains supported for legacy rooms. Room version 2 binds membership to a
 selected-route SHA-256 fingerprint and optionally references a ready hosted artifact. An absent
 `allowBankedDistance` field preserves the legacy behavior of allowing banked distance; when present,
-the Boolean is immutable for that room.
+the owner can change the Boolean while the room is open; closing freezes that policy.
+
+## Upgrading social clients to 2.17.76
+
+Deploy the supplied rules and indexes, wait for indexes to become enabled, and follow
+[the capacity migration instructions](SOCIAL.md#server-setup) before distributing the updated
+clients. The migration locks friendship mutations, backs up and counts existing relationships,
+reconciles counters, verifies them, and unlocks. Existing over-limit accounts retain their edges
+and can remove them. Do not replace derived counts with client-supplied totals or manually delete
+the lock to bypass an interrupted migration. Rerun the tool to resume reconciliation.
+
+The old 2.17.75 social client cannot mutate friendships under the new atomic protocol. Ordinary
+race clients retain compatibility. Fresh servers with no social relationships need no migration.
 
 ## Invariants to preserve
 

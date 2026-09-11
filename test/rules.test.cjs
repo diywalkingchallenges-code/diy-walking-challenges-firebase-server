@@ -14,6 +14,7 @@ const {
   serverTimestamp,
   setDoc,
   updateDoc,
+  writeBatch, query, where, orderBy, limit, startAfter, endBefore, limitToLast, runTransaction, documentId,
 } = require("firebase/firestore");
 const {
   deleteObject,
@@ -123,6 +124,110 @@ beforeEach(async () => {
 
 after(async () => {
   await environment.cleanup();
+});
+
+function socialData(publicLeaderboard = false) {
+  return { nickname: "Social tester", icon: "", publicLeaderboard, updatedAt: serverTimestamp(),
+    totalMeters: 100, recordedMeters: 70, manualMeters: 20, otherMeters: 10,
+    medals: 3, racesFinished: 2, racesWon: 1 };
+}
+async function socialProfile(uid, isPublic = false) {
+  const db = environment.authenticatedContext(uid).firestore();
+  const batch = writeBatch(db);
+  const data = socialData(isPublic);
+  batch.set(doc(db, "socialProfiles", uid), data);
+  batch.set(doc(db, "friendCards", uid), { nickname: data.nickname, icon: "" });
+  if (isPublic) batch.set(doc(db, "leaderboard", uid), data);
+  else batch.delete(doc(db, "leaderboard", uid));
+  await assertSucceeds(batch.commit());
+  return db;
+}
+async function requestSocialFriend(a = "alice", b = "bob") {
+  const db = await socialProfile(a);
+  await socialProfile(b);
+  const id = [a, b].sort().join("_");
+  const ref = doc(db, "friendships", id);
+  await assertSucceeds(getDoc(ref)); // transaction must be able to read a missing relationship
+  await assertSucceeds(changeFriend(db, a, b, "request"));
+  return { db, id };
+}
+test("social: private profiles and trophies require accepted friendship, including lists", async () => {
+  const { db, id } = await requestSocialFriend();
+  const bob = environment.authenticatedContext("bob").firestore();
+  const outsider = environment.authenticatedContext("eve").firestore();
+  await setDoc(doc(db, "socialProfiles", "alice", "trophies", "medal"), { title: "Test medal", earnedAt: 100, image: "" });
+  await assertFails(getDoc(doc(bob, "socialProfiles", "alice")));
+  await assertFails(getDocs(collection(bob, "socialProfiles", "alice", "trophies")));
+  await assertSucceeds(getDoc(doc(bob, "friendCards", "alice")));
+  await assertFails(getDocs(collection(bob, "friendCards")));
+  await assertFails(getDocs(collection(bob, "socialProfiles")));
+  await assertFails(updateDoc(doc(db, "friendships", id), { status: "accepted" }));
+  await assertFails(updateDoc(doc(outsider, "friendships", id), { status: "accepted" }));
+  await assertSucceeds(changeFriend(bob, "bob", "alice", "accept"));
+  await assertSucceeds(getDoc(doc(bob, "socialProfiles", "alice")));
+  await assertSucceeds(getDocs(query(collection(bob, "socialProfiles", "alice", "trophies"), orderBy("earnedAt", "desc"), orderBy("__name__", "desc"), limit(24))));
+  await assertFails(getDoc(doc(outsider, "socialProfiles", "alice")));
+  await assertSucceeds(getDocs(query(collection(bob, "friendships"), where("members", "array-contains", "bob"), limit(25))));
+  await assertFails(getDocs(collection(bob, "friendships")));
+  await assertFails(setDoc(doc(bob, "socialProfiles", "alice", "trophies", "fake"), { title: "Forged", earnedAt: 100, image: "" }));
+  await assertSucceeds(changeFriend(bob, "bob", "alice", "remove"));
+  await assertFails(getDoc(doc(bob, "socialProfiles", "alice")));
+});
+test("social: blocking revokes access and only blocker can unblock", async () => {
+  const { db, id } = await requestSocialFriend();
+  const bob = environment.authenticatedContext("bob").firestore();
+  await changeFriend(bob, "bob", "alice", "accept");
+  await assertSucceeds(changeFriend(db, "alice", "bob", "block"));
+  await assertFails(getDoc(doc(bob, "socialProfiles", "alice")));
+  await assertFails(deleteDoc(doc(bob, "friendships", id)));
+  await assertFails(updateDoc(doc(bob, "friendships", id), { status: "accepted", blockedBy: "" }));
+  await assertSucceeds(changeFriend(db, "alice", "bob", "remove"));
+});
+test("social: public opt-in exposes summary only, pagination works, opt-out is atomic", async () => {
+  const db = await socialProfile("alice", true);
+  await socialProfile("bob", true);
+  const reader = environment.authenticatedContext("reader").firestore();
+  await assertSucceeds(getDoc(doc(reader, "leaderboard", "alice")));
+  await assertFails(getDoc(doc(reader, "socialProfiles", "alice")));
+  await assertFails(getDocs(collection(reader, "socialProfiles", "alice", "trophies")));
+  const page = await assertSucceeds(getDocs(query(collection(reader, "leaderboard"), orderBy("totalMeters", "desc"), orderBy("__name__", "desc"), limit(1))));
+  const second = await assertSucceeds(getDocs(query(collection(reader, "leaderboard"), orderBy("totalMeters", "desc"), orderBy("__name__", "desc"), startAfter(page.docs[0]), limit(1))));
+  assert.notEqual(page.docs[0].id, second.docs[0].id);
+  await assertFails(getDocs(query(collection(reader, "leaderboard"), limit(26))));
+  await assertFails(updateDoc(doc(db, "socialProfiles", "alice"), { publicLeaderboard: false, updatedAt: serverTimestamp() }));
+  await socialProfile("alice", false);
+  assert.equal((await getDoc(doc(reader, "leaderboard", "alice"))).exists(), false);
+  await assertFails(setDoc(doc(db, "leaderboard", "alice"), socialData(true)));
+  await assertFails(setDoc(doc(reader, "leaderboard", "bob"), socialData(true)));
+  await assertFails(setDoc(doc(db, "socialProfiles", "alice"), { ...socialData(), medals: -1 }));
+  await assertFails(setDoc(doc(db, "socialProfiles", "alice"), { ...socialData(), homeAddress: "private" }));
+});
+test("social: race invites require friendship and room membership; acceptance requires joining", async () => {
+  const { db, id } = await requestSocialFriend();
+  const bob = environment.authenticatedContext("bob").firestore();
+  const roomId = "S".repeat(43);
+  await environment.withSecurityRulesDisabled(async ctx => {
+    const admin = ctx.firestore();
+    await setDoc(doc(admin, "races", roomId), { name: "Friends race", isOpen: true, deleting: false });
+    await setDoc(doc(admin, "races", roomId, "members", "alice"), { progressMeters: 100, updatedAtEpochMillis: 200 });
+  });
+  const inviteId = `${roomId}_alice_bob`;
+  const invite = { fromUid: "alice", toUid: "bob", roomId, roomName: "Friends race", status: "pending", createdAt: serverTimestamp() };
+  await assertSucceeds(getDoc(doc(db, "socialInvites", inviteId)));
+  await assertFails(setDoc(doc(db, "socialInvites", inviteId), invite));
+  await changeFriend(bob, "bob", "alice", "accept");
+  await assertSucceeds(setDoc(doc(db, "socialInvites", inviteId), invite));
+  await assertSucceeds(getDocs(query(collection(bob, "socialInvites"), where("toUid", "==", "bob"), limit(25))));
+  await assertFails(getDocs(collection(bob, "socialInvites")));
+  await assertFails(updateDoc(doc(db, "socialInvites", inviteId), { status: "accepted" }));
+  await assertFails(updateDoc(doc(bob, "socialInvites", inviteId), { status: "accepted" }));
+  await assertFails(updateDoc(doc(bob, "socialInvites", inviteId), { roomName: "Forged" }));
+  await environment.withSecurityRulesDisabled(ctx => setDoc(doc(ctx.firestore(), "races", roomId, "members", "bob"), { progressMeters: 0, updatedAtEpochMillis: 200 }));
+  await assertSucceeds(updateDoc(doc(bob, "socialInvites", inviteId), { status: "accepted" }));
+  await assertFails(setDoc(doc(db, "races", roomId, "socialFinishes", "bob"), { goalMeters: 100, finishedAt: 100 }));
+  await assertSucceeds(setDoc(doc(db, "races", roomId, "socialFinishes", "alice"), { goalMeters: 100, finishedAt: 100 }));
+  await assertFails(setDoc(doc(db, "races", roomId, "socialFinishes", "alice"), { goalMeters: 100, finishedAt: 300 }));
+  await assertFails(setDoc(doc(bob, "races", roomId, "socialFinishes", "bob"), { goalMeters: 100, finishedAt: 100 }));
 });
 
 test("immutable artifact is readable only after a rules-validated share grant", async () => {
@@ -458,28 +563,168 @@ test("file-only race fingerprint cannot disguise partial hosted metadata", async
   await assertFails(setDoc(doc(db, "races", roomId), { ...policyRoomData(), artifactThumbnailPath: "" }));
 });
 
-function memberData({
-  uid,
-  participantId,
-  sequence = 0,
-  progressMeters = 0,
-  totalDistanceMeters = 0,
-} = {}) {
-  return {
-    v: 2,
-    participantId: participantId ?? `${uid}-participant`,
-    nickname: uid === ownerUid ? "Owner" : "Racer",
-    packId: "diywc.pack.policy",
-    packRevision: 1,
-    challengeId: "challenge",
-    challengeFingerprint,
-    progressMeters,
-    totalDistanceMeters,
-    sequence,
-    updatedAtEpochMillis: sequence + 2,
-    lastSyncedAt: serverTimestamp(),
-  };
+// Exercise the same four-document atomic protocol as Android, with no privileged writes.
+async function changeFriend(db, actor, other, action) {
+  return runTransaction(db, async tx => {
+    const ref = doc(db, "friendships", [actor, other].sort().join("_"));
+    const before = (await tx.get(ref)).data();
+    const after = action === "request" ? { members: [actor, other].sort(), fromUid: actor, status: "pending", blockedBy: "" }
+      : action === "accept" ? { ...before, status: "accepted" }
+      : action === "block" ? { ...before, status: "blocked", blockedBy: actor } : undefined;
+    const caps = [];
+    for (const uid of [actor, other]) {
+      const cap = doc(db, "socialCapacity", uid);
+      const value = (await tx.get(cap)).data() || { friends: 0, incoming: 0, outgoing: 0 };
+      const counts = e => e?.status === "accepted" ? { friends: 1, incoming: 0, outgoing: 0 }
+        : e?.status === "pending" ? { friends: 0, incoming: e.fromUid === uid ? 0 : 1, outgoing: e.fromUid === uid ? 1 : 0 }
+        : { friends: 0, incoming: 0, outgoing: 0 };
+      const a=counts(before), b=counts(after);
+      caps.push([cap, Object.fromEntries(Object.keys(value).map(k=>[k, value[k]-a[k]+b[k]]))]);
+    }
+    tx.set(doc(db, "socialChanges", actor), { otherUid: other, at: serverTimestamp() });
+    caps.forEach(([ref, value])=>tx.set(ref, value));
+    if (after) tx.set(ref, after); else tx.delete(ref);
+  });
 }
+async function seedCapacity(uid, values) {
+  await environment.withSecurityRulesDisabled(ctx=>setDoc(doc(ctx.firestore(), "socialCapacity", uid), { friends: 0, incoming: 0, outgoing: 0, ...values }));
+}
+test("social limits: cannot reset, forge, skip, or delete capacity counters", async () => {
+  const {db, id}=await requestSocialFriend();
+  const bob=environment.authenticatedContext("bob").firestore();
+  for (const uid of ["alice", "bob"]) {
+    await assertFails(setDoc(doc(db,"socialCapacity",uid), {friends:0,incoming:0,outgoing:0}));
+    await assertFails(deleteDoc(doc(db,"socialCapacity",uid)));
+  }
+  await assertFails(getDocs(query(collection(db,"socialCapacity"),limit(25))));
+  await assertFails(getDoc(doc(bob,"socialChanges","alice")));
+  await assertFails(updateDoc(doc(bob,"friendships",id), {status:"accepted"}));
+  await assertFails(deleteDoc(doc(db,"friendships",id)));
+  const batch=writeBatch(db);
+  batch.set(doc(db,"socialChanges","alice"),{otherUid:"bob",at:serverTimestamp()});
+  batch.set(doc(db,"socialCapacity","alice"),{friends:0,incoming:0,outgoing:0});
+  await assertFails(batch.commit());
+  await assertSucceeds(changeFriend(bob,"bob","alice","accept"));
+  assert.deepEqual((await getDoc(doc(db,"socialCapacity","alice"))).data(), {friends:1,incoming:0,outgoing:0});
+  await assertSucceeds(changeFriend(db,"alice","bob","block"));
+  assert.deepEqual((await getDoc(doc(db,"socialCapacity","alice"))).data(), {friends:0,incoming:0,outgoing:0});
+  await assertFails(changeFriend(bob,"bob","alice","request"));
+  await assertSucceeds(changeFriend(db,"alice","bob","remove"));
+});
+test("social limits: pending boundary and concurrent senders cannot exceed 50", async () => {
+  const alice=await socialProfile("alice"), bob=await socialProfile("bob"), carol=await socialProfile("carol");
+  await seedCapacity("bob",{incoming:49});
+  const results=await Promise.allSettled([changeFriend(alice,"alice","bob","request"),changeFriend(carol,"carol","bob","request")]);
+  assert.equal(results.filter(r=>r.status==="fulfilled").length,1);
+  assert.equal((await getDoc(doc(bob,"socialCapacity","bob"))).data().incoming,50);
+  await seedCapacity("alice",{outgoing:50});
+  await assertFails(changeFriend(alice,"alice","carol","request"));
+});
+test("social limits: 200 friends, simultaneous accepts, and removal release capacity", async () => {
+  const alice=await socialProfile("alice"), bob=await socialProfile("bob"), carol=await socialProfile("carol");
+  await changeFriend(bob,"bob","alice","request");
+  await changeFriend(carol,"carol","alice","request");
+  await seedCapacity("alice",{friends:199,incoming:2});
+  const results=await Promise.allSettled([changeFriend(alice,"alice","bob","accept"),changeFriend(alice,"alice","carol","accept")]);
+  assert.equal(results.filter(r=>r.status==="fulfilled").length,1);
+  assert.equal((await getDoc(doc(alice,"socialCapacity","alice"))).data().friends,200);
+  const accepted=results[0].status==="fulfilled"?"bob":"carol", pending=accepted==="bob"?"carol":"bob";
+  await changeFriend(alice,"alice",accepted,"remove");
+  await assertSucceeds(changeFriend(alice,"alice",pending,"accept"));
+  assert.equal((await getDoc(doc(alice,"socialCapacity","alice"))).data().friends,200);
+});
+test("social scaling: thousands of tied leaderboard entries page both ways with bounded reads", async () => {
+  await environment.withSecurityRulesDisabled(async ctx => {
+    const db=ctx.firestore();
+    for(let start=0;start<2500;start+=250) {
+      const batch=writeBatch(db);
+      for(let i=start;i<start+250;i++) batch.set(doc(db,"leaderboard",`racer${String(i).padStart(4,"0")}`),{...socialData(true), totalMeters:Math.floor(i/3)});
+      await batch.commit();
+    }
+  });
+  const db=environment.authenticatedContext("viewer").firestore();
+  const base=query(collection(db,"leaderboard"),orderBy("totalMeters","desc"),orderBy(documentId(),"desc"));
+  let cursor, previous, count=0;
+  const ids=new Set();
+  for(let i=0;i<100;i++) {
+    const page=await getDocs(cursor?query(base,startAfter(cursor),limit(25)):query(base,limit(25)));
+    assert.equal(page.size,25);
+    for(const row of page.docs) {assert(!ids.has(row.id));ids.add(row.id);}
+    if(previous) {
+      const back=await getDocs(query(base,endBefore(page.docs[0]),limitToLast(25)));
+      assert.deepEqual(back.docs.map(d=>d.id),previous);
+    }
+    previous=page.docs.map(d=>d.id);cursor=page.docs.at(-1);count+=page.size;
+  }
+  assert.equal(count,2500);
+  assert.equal((await getDocs(query(base,startAfter(cursor),limit(25)))).size,0);
+  await assertFails(getDocs(query(base,limit(26))));
+});
+test("social scaling: each friends category is paged and unbounded queries are rejected", async () => {
+  await environment.withSecurityRulesDisabled(async ctx=>{
+    const db=ctx.firestore();
+    const batch=writeBatch(db);
+    for(let i=0;i<175;i++) {
+      const other=`user${String(i).padStart(3,"0")}`;
+      batch.set(doc(db,"friendships",`alice_${other}`),{members:["alice",other],fromUid:i<100?"alice":other,status:i<75?"accepted":i<125?"pending":"blocked",blockedBy:i>=125?"alice":""});
+    }
+    await batch.commit();
+  });
+  const db=environment.authenticatedContext("alice").firestore();
+  const base=query(collection(db,"friendships"),where("members","array-contains","alice"));
+  for(const parts of [ [where("status","==","accepted")], [where("status","==","pending"),where("fromUid","==","alice")],
+    [where("status","==","pending"),where("fromUid","!=","alice"),orderBy("fromUid")], [where("status","==","blocked"),where("blockedBy","==","alice")] ]) {
+    const q=query(base,...parts,orderBy(documentId()));
+    const first=await assertSucceeds(getDocs(query(q,limit(25))));assert.equal(first.size,25);
+    const second=await assertSucceeds(getDocs(query(q,startAfter(first.docs.at(-1)),limit(25))));assert(second.size<=25);
+  }
+  await assertFails(getDocs(base));
+  await assertFails(getDocs(query(base,limit(301))));
+  await assertFails(getDocs(query(base,where("status","==","blocked"),limit(26))));
+  assert.equal((await assertSucceeds(getDocs(query(base,where("status","in",["accepted","pending"]),limit(300))))).size,125);
+});
+
+test("social migration: preserves legacy edges, rebuilds capacity, is repeatable, and locks writes", async () => {
+  const alice = await socialProfile("alice"), bob = await socialProfile("bob");
+  await socialProfile("carol");
+  await environment.withSecurityRulesDisabled(async ctx => {
+    const db = ctx.firestore();
+    await setDoc(doc(db,"friendships","alice_bob"), {members:["alice","bob"],fromUid:"alice",status:"accepted",blockedBy:""});
+    await setDoc(doc(db,"friendships","alice_carol"), {members:["alice","carol"],fromUid:"carol",status:"pending",blockedBy:""});
+  });
+  const {spawnSync} = require('node:child_process');
+  for(let i=0;i<2;i++) {
+    const run=spawnSync(process.execPath,['tools/migrate-social-capacity.cjs','--project','demo-diywc','--apply'],{
+      env:{...process.env,FIRESTORE_EMULATOR_HOST:'127.0.0.1:8080'},encoding:'utf8',timeout:20000
+    });
+    assert.equal(run.status,0,run.stderr);
+  }
+  assert.deepEqual((await getDoc(doc(alice,"socialCapacity","alice"))).data(),{friends:1,incoming:1,outgoing:0});
+  assert.equal((await getDoc(doc(alice,"friendships","alice_bob"))).data().status,"accepted");
+  await environment.withSecurityRulesDisabled(ctx=>setDoc(doc(ctx.firestore(),"socialMaintenance","capacity"),{purpose:"social-capacity-v1"}));
+  await assertFails(changeFriend(alice,"alice","bob","remove"));
+  await assertFails(changeFriend(alice,"alice","carol","accept"));
+  await assertFails(deleteDoc(doc(alice,"socialMaintenance","capacity")));
+  await environment.withSecurityRulesDisabled(ctx=>deleteDoc(doc(ctx.firestore(),"socialMaintenance","capacity")));
+  await assertSucceeds(changeFriend(alice,"alice","bob","remove"));
+});
+
+test("social notifications: invitation cursor crosses equal timestamps without replay or skipped pages", async () => {
+  await environment.withSecurityRulesDisabled(async ctx=>{
+    const db=ctx.firestore(), batch=writeBatch(db);
+    for(let i=0;i<60;i++) batch.set(doc(db,"socialInvites",`invite${String(i).padStart(3,'0')}`),{fromUid:"alice",toUid:"bob",roomId:"room",roomName:"Race",status:i%2?"pending":"dismissed",createdAt:serverTimestamp()});
+    await batch.commit();
+  });
+  const db=environment.authenticatedContext("bob").firestore();
+  const q=query(collection(db,"socialInvites"),where("toUid","==","bob"),orderBy("createdAt"),orderBy(documentId()));
+  let last, total=0; const ids=new Set();
+  for(let i=0;i<3;i++) {
+    const docs=(await getDocs(last?query(q,startAfter(last.get('createdAt'),last.id),limit(25)):query(q,limit(25)))).docs;
+    assert(docs.length<=25);total+=docs.length;docs.forEach(d=>{assert(!ids.has(d.id));ids.add(d.id)});last=docs.at(-1);
+  }
+  assert.equal(total,60);
+  assert.equal((await getDocs(query(q,startAfter(last.get('createdAt'),last.id),limit(25)))).size,0);
+});
 
 test("signed-out clients cannot read invite-addressed room or share metadata", async () => {
   const ownerDb = environment.authenticatedContext(ownerUid).firestore();
@@ -634,3 +879,26 @@ test("bounded racer icons can be shared, replaced and removed only by their part
   await assertSucceeds(setDoc(member, memberData({ uid: readerUid, sequence: 2 })));
   assert.equal((await getDoc(member)).data().racerIcon, undefined);
 });
+
+function memberData({
+  uid,
+  participantId,
+  sequence = 0,
+  progressMeters = 0,
+  totalDistanceMeters = 0,
+} = {}) {
+  return {
+    v: 2,
+    participantId: participantId ?? `${uid}-participant`,
+    nickname: uid === ownerUid ? "Owner" : "Racer",
+    packId: "diywc.pack.policy",
+    packRevision: 1,
+    challengeId: "challenge",
+    challengeFingerprint,
+    progressMeters,
+    totalDistanceMeters,
+    sequence,
+    updatedAtEpochMillis: sequence + 2,
+    lastSyncedAt: serverTimestamp(),
+  };
+}

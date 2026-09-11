@@ -308,6 +308,176 @@ service cloud.firestore {
       }
     }
 
+    match /races/{roomId}/socialFinishes/{uid} {
+      allow read: if isMember(roomId);
+      allow create, update: if signedIn() && request.auth.uid == uid && isMember(roomId)
+        && request.resource.data.keys().hasOnly(['goalMeters', 'finishedAt'])
+        && validDistance(request.resource.data.goalMeters) && request.resource.data.goalMeters > 0
+        && validEpoch(request.resource.data.finishedAt)
+        && (request.resource.data.finishedAt == 0
+          || (get(memberPath(roomId, uid)).data.progressMeters >= request.resource.data.goalMeters
+            && request.resource.data.finishedAt <= get(memberPath(roomId, uid)).data.updatedAtEpochMillis));
+      allow delete: if false;
+    }
+    function socialPath(uid) { return /databases/$(database)/documents/socialProfiles/$(uid); }
+    function friendshipPath(a, b) {
+      let id = a < b ? a + '_' + b : b + '_' + a;
+      return /databases/$(database)/documents/friendships/$(id);
+    }
+    function friends(a, b) {
+      return a != b && exists(friendshipPath(a, b))
+        && get(friendshipPath(a, b)).data.status == 'accepted';
+    }
+    function profileReader(uid) { return signedIn() && (request.auth.uid == uid || friends(request.auth.uid, uid)); }
+    function validSocial(data) {
+      return data.keys().hasOnly(['nickname', 'icon', 'publicLeaderboard', 'updatedAt',
+        'totalMeters', 'recordedMeters', 'manualMeters', 'otherMeters', 'medals', 'racesFinished', 'racesWon'])
+        && data.nickname is string && data.nickname.size() > 0 && data.nickname.size() <= 160
+        && data.icon is string && data.icon.size() <= 684 && data.publicLeaderboard is bool
+        && validDistance(data.totalMeters) && validDistance(data.recordedMeters)
+        && validDistance(data.manualMeters) && validDistance(data.otherMeters)
+        && data.recordedMeters + data.manualMeters + data.otherMeters <= data.totalMeters + 0.01
+        && data.medals is int && data.medals >= 0 && data.medals <= 1000000
+        && data.racesFinished is int && data.racesFinished >= 0 && data.racesFinished <= 1000000
+        && data.racesWon is int && data.racesWon >= 0 && data.racesWon <= 1000000
+        && data.updatedAt == request.time;
+    }
+    match /socialProfiles/{uid} {
+      allow get: if profileReader(uid);
+      allow list: if false;
+      allow create, update: if signedIn() && request.auth.uid == uid && validSocial(request.resource.data)
+        && (request.resource.data.publicLeaderboard == false
+          ? !existsAfter(/databases/$(database)/documents/leaderboard/$(uid))
+          : getAfter(/databases/$(database)/documents/leaderboard/$(uid)).data == request.resource.data);
+      allow delete: if false;
+      match /trophies/{trophyId} {
+        allow read: if profileReader(uid);
+        allow create, update: if signedIn() && request.auth.uid == uid
+          && request.resource.data.keys().hasOnly(['title', 'earnedAt', 'image'])
+          && request.resource.data.title is string && request.resource.data.title.size() <= 240
+          && validEpoch(request.resource.data.earnedAt)
+          && request.resource.data.image is string && request.resource.data.image.size() <= 24000;
+        allow delete: if signedIn() && request.auth.uid == uid;
+      }
+    }
+    // Friend codes reveal only nickname/icon. Random auth IDs cannot be listed or searched by name.
+    match /friendCards/{uid} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['nickname', 'icon'])
+        && request.resource.data.nickname == getAfter(socialPath(uid)).data.nickname
+        && request.resource.data.icon == getAfter(socialPath(uid)).data.icon;
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+    match /leaderboard/{uid} {
+      allow get: if signedIn();
+      allow list: if signedIn() && request.query.limit <= 25;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && validSocial(request.resource.data) && request.resource.data.publicLeaderboard == true
+        && request.resource.data == getAfter(socialPath(uid)).data;
+      allow delete: if signedIn() && request.auth.uid == uid
+        && getAfter(socialPath(uid)).data.publicLeaderboard == false;
+    }
+    function capacityPath(uid) { return /databases/$(database)/documents/socialCapacity/$(uid); }
+    function changePath(uid) { return /databases/$(database)/documents/socialChanges/$(uid); }
+    function edgeCounts(data, uid) {
+      return data.get('status', '') == 'accepted' ? {'friends': 1, 'incoming': 0, 'outgoing': 0}
+        : data.get('status', '') == 'pending'
+          ? {'friends': 0, 'incoming': data.fromUid == uid ? 0 : 1, 'outgoing': data.fromUid == uid ? 1 : 0}
+          : {'friends': 0, 'incoming': 0, 'outgoing': 0};
+    }
+    function counterValue(old, next, before, after, key, maximum) {
+      return next[key] is int && next[key] >= 0
+        && next[key] == old[key] - before[key] + after[key]
+        && (next[key] <= maximum || next[key] <= old[key]);
+    }
+    function validCapacity(uid, before, after) {
+      let old = exists(capacityPath(uid)) ? get(capacityPath(uid)).data : {'friends': 0, 'incoming': 0, 'outgoing': 0};
+      let next = getAfter(capacityPath(uid)).data;
+      let a = edgeCounts(before, uid);
+      let b = edgeCounts(after, uid);
+      return next.keys().hasOnly(['friends', 'incoming', 'outgoing'])
+        && counterValue(old, next, a, b, 'friends', 200)
+        && counterValue(old, next, a, b, 'incoming', 50)
+        && counterValue(old, next, a, b, 'outgoing', 50);
+    }
+    function countedEdge(members, before, after) {
+      let proof = getAfter(changePath(request.auth.uid)).data;
+      return !exists(/databases/$(database)/documents/socialMaintenance/capacity)
+        && proof.at == request.time && proof.otherUid in members && proof.otherUid != request.auth.uid
+        && validCapacity(members[0], before, after) && validCapacity(members[1], before, after);
+    }
+    function capacityChange(uid) {
+      let proof = getAfter(changePath(request.auth.uid)).data;
+      let other = uid == request.auth.uid ? proof.otherUid : request.auth.uid;
+      let path = friendshipPath(uid, other);
+      let before = exists(path) ? get(path).data : {};
+      let after = existsAfter(path) ? getAfter(path).data : {};
+      return proof.at == request.time && (uid == request.auth.uid || uid == proof.otherUid)
+        && before != after && validCapacity(uid, before, after);
+    }
+    match /socialCapacity/{uid} {
+      // Only aggregate capacity; relationships and the mutation proof remain private.
+      allow get: if signedIn();
+      allow list, delete: if false;
+      allow create, update: if signedIn() && capacityChange(uid);
+    }
+    match /socialChanges/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, delete: if false;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['otherUid', 'at'])
+        && request.resource.data.otherUid is string && request.resource.data.otherUid != uid
+        && request.resource.data.at == request.time;
+    }
+    match /friendships/{edgeId} {
+      allow get: if signedIn() && !exists(/databases/$(database)/documents/friendships/$(edgeId));
+      allow get: if signedIn() && request.auth.uid in resource.data.members;
+      allow list: if signedIn() && request.auth.uid in resource.data.members
+        && (request.query.limit <= 25 || (request.query.limit <= 300 && resource.data.status in ['pending', 'accepted']));
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['members', 'fromUid', 'status', 'blockedBy'])
+        && request.resource.data.members is list && request.resource.data.members.size() == 2
+        && request.resource.data.members[0] < request.resource.data.members[1]
+        && edgeId == request.resource.data.members[0] + '_' + request.resource.data.members[1]
+        && request.auth.uid in request.resource.data.members
+        && request.resource.data.fromUid == request.auth.uid && request.resource.data.status == 'pending'
+        && request.resource.data.blockedBy == ''
+        && exists(socialPath(request.resource.data.members[0])) && exists(socialPath(request.resource.data.members[1]))
+        && countedEdge(request.resource.data.members, {}, request.resource.data);
+      allow update: if signedIn() && request.auth.uid in resource.data.members
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'blockedBy'])
+        && ((resource.data.status == 'pending' && request.auth.uid != resource.data.fromUid
+            && request.resource.data.status == 'accepted' && request.resource.data.blockedBy == '')
+          || (resource.data.status in ['pending', 'accepted'] && request.resource.data.status == 'blocked'
+            && request.resource.data.blockedBy == request.auth.uid))
+        && countedEdge(resource.data.members, resource.data, request.resource.data);
+      allow delete: if signedIn() && request.auth.uid in resource.data.members
+        && (resource.data.status != 'blocked' || resource.data.blockedBy == request.auth.uid)
+        && countedEdge(resource.data.members, resource.data, {});
+    }
+    match /socialInvites/{inviteId} {
+      allow get: if signedIn() && !exists(/databases/$(database)/documents/socialInvites/$(inviteId));
+      allow get: if signedIn() && (resource.data.toUid == request.auth.uid || resource.data.fromUid == request.auth.uid);
+      allow list: if signedIn() && request.query.limit <= 25
+        && (resource.data.toUid == request.auth.uid || resource.data.fromUid == request.auth.uid);
+      allow create: if signedIn() && request.resource.data.keys().hasOnly([
+          'fromUid', 'toUid', 'roomId', 'roomName', 'status', 'createdAt'])
+        && request.resource.data.fromUid == request.auth.uid
+        && friends(request.auth.uid, request.resource.data.toUid)
+        && request.resource.data.status == 'pending' && request.resource.data.createdAt == request.time
+        && isMember(request.resource.data.roomId)
+        && get(roomPath(request.resource.data.roomId)).data.isOpen == true
+        && get(roomPath(request.resource.data.roomId)).data.deleting == false
+        && request.resource.data.roomName == get(roomPath(request.resource.data.roomId)).data.name
+        && inviteId == request.resource.data.roomId + '_' + request.auth.uid + '_' + request.resource.data.toUid;
+      allow update: if signedIn() && request.auth.uid == resource.data.toUid && resource.data.status == 'pending'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        && (request.resource.data.status == 'dismissed'
+          || (request.resource.data.status == 'accepted' && isMember(resource.data.roomId)));
+      allow delete: if false;
+    }
     match /{document=**} { allow read, write: if false; }
   }
 }
